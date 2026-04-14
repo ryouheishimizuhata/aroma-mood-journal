@@ -1,28 +1,46 @@
 import React, { useEffect, useState } from 'react'
 import localforage from 'localforage'
 
+type EntryImage = {
+  name: string
+  type: string
+  dataUrl: string
+}
+
+type EntryParams = {
+  intensity: number
+  pleasantness: number
+  familiarity: number
+  freshness: number
+  sweetness: number
+}
+
 type Entry = {
   id: string
   timestamp: string
-  scent: string
-  source: 'perfume' | 'food' | 'environment' | 'other'
-  intensity: number // 0-5
-  valence: number   // -3..+3
-  arousal: number   // 1..5
-  moodTags: string[]
-  place?: string
-  notes?: string
+  text: string
+  image?: EntryImage
+  params: EntryParams
 }
 
 const store = localforage.createInstance({ name: 'aroma-journal' })
-const KEY = 'entries'
+const KEY = 'entries_v2'
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
 
 export default function App() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [pwaInstallable, setPwaInstallable] = useState(false)
   const [deferred, setDeferred] = useState<any>(null)
+  const [previewUrl, setPreviewUrl] = useState<string>('')
 
-  // Android向けPWAインストールプロンプト
   useEffect(() => {
     const handler = (e: any) => {
       e.preventDefault()
@@ -33,50 +51,87 @@ export default function App() {
     return () => window.removeEventListener('beforeinstallprompt', handler)
   }, [])
 
-  // ロード
   useEffect(() => {
-    (async () => {
+    ;(async () => {
       const saved = (await store.getItem<Entry[]>(KEY)) || []
       setEntries(saved)
     })()
   }, [])
 
-  // 追加
   async function addEntry(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const form = new FormData(e.currentTarget)
     const now = new Date().toISOString()
+
+    const file = form.get('image')
+    let image: EntryImage | undefined
+
+    if (file instanceof File && file.size > 0) {
+      const dataUrl = await fileToDataUrl(file)
+      image = {
+        name: file.name,
+        type: file.type,
+        dataUrl
+      }
+    }
+
     const entry: Entry = {
       id: crypto.randomUUID(),
       timestamp: now,
-      scent: String(form.get('scent') || '').trim(),
-      source: (form.get('source') as Entry['source']) || 'environment',
-      intensity: Number(form.get('intensity') || 0),
-      valence: Number(form.get('valence') || 0),
-      arousal: Number(form.get('arousal') || 3),
-      moodTags: Array.from(form.getAll('mood') as string[]),
-      place: String(form.get('place') || '') || undefined,
-      notes: String(form.get('notes') || '') || undefined
+      text: String(form.get('text') || '').trim(),
+      image,
+      params: {
+        intensity: Number(form.get('intensity') || 0),
+        pleasantness: Number(form.get('pleasantness') || 0),
+        familiarity: Number(form.get('familiarity') || 0),
+        freshness: Number(form.get('freshness') || 0),
+        sweetness: Number(form.get('sweetness') || 0)
+      }
     }
+
     const updated = [entry, ...entries]
     await store.setItem(KEY, updated)
     setEntries(updated)
+    setPreviewUrl('')
     e.currentTarget.reset()
   }
 
-  // CSVエクスポート
   function exportCsv() {
-    const header = ['timestamp','scent','source','intensity','valence','arousal','moodTags','place','notes']
-    const rows = entries.map(r => [
-      r.timestamp, r.scent, r.source, r.intensity, r.valence, r.arousal,
-      r.moodTags.join('|'), r.place ?? '', (r.notes ?? '').replaceAll('\n',' ')
+    const header = [
+      'timestamp',
+      'text',
+      'intensity',
+      'pleasantness',
+      'familiarity',
+      'freshness',
+      'sweetness',
+      'imageName',
+      'imageType',
+      'hasImage'
+    ]
+
+    const rows = entries.map((r) => [
+      r.timestamp,
+      r.text.replaceAll('\n', ' '),
+      r.params.intensity,
+      r.params.pleasantness,
+      r.params.familiarity,
+      r.params.freshness,
+      r.params.sweetness,
+      r.image?.name ?? '',
+      r.image?.type ?? '',
+      r.image ? 'true' : 'false'
     ])
-    const csv = [header, ...rows].map(a => a.map(s => `"${String(s).replaceAll('"','""')}"`).join(',')).join('\n')
+
+    const csv = [header, ...rows]
+      .map((a) => a.map((s) => `"${String(s).replaceAll('"', '""')}"`).join(','))
+      .join('\n')
+
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `aroma_journal_${new Date().toISOString().slice(0,10)}.csv`
+    a.download = `aroma_journal_${new Date().toISOString().slice(0, 10)}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -89,56 +144,121 @@ export default function App() {
     setPwaInstallable(false)
   }
 
+  async function clearAll() {
+    const ok = window.confirm('すべての記録を削除します。よろしいですか？')
+    if (!ok) return
+    await store.setItem(KEY, [])
+    setEntries([])
+  }
+
+  function handlePreview(file: File | null) {
+    if (!file) {
+      setPreviewUrl('')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => setPreviewUrl(String(reader.result))
+    reader.readAsDataURL(file)
+  }
+
   return (
-    <div style={{maxWidth: 560, margin: '0 auto', padding: 16}}>
-      <header style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-        <h1 style={{fontSize:20}}>香り気分日記</h1>
+    <div style={{ maxWidth: 680, margin: '0 auto', padding: 16 }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <h1 style={{ fontSize: 20, margin: 0 }}>におい記録</h1>
         <div>
           {pwaInstallable && <button onClick={installPWA}>インストール</button>}
-          <button onClick={exportCsv} style={{marginLeft:8}}>CSV</button>
+          <button onClick={exportCsv} style={{ marginLeft: 8 }}>CSV</button>
+          <button onClick={clearAll} style={{ marginLeft: 8 }}>全削除</button>
         </div>
       </header>
 
-      <form onSubmit={addEntry} style={{display:'grid',gap:12,marginTop:12}}>
-        <input name="scent" placeholder="香り（例：レモン/コーヒー/雨上がり…）" required />
+      <form onSubmit={addEntry} style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <div>
-          出所：
-          <select name="source" defaultValue="environment">
-            <option value="perfume">自分の香水</option>
-            <option value="food">食べ物/飲み物</option>
-            <option value="environment">環境</option>
-            <option value="other">その他</option>
-          </select>
+          <label htmlFor="image">画像</label>
+          <input
+            id="image"
+            name="image"
+            type="file"
+            accept="image/*"
+            onChange={(e) => handlePreview(e.target.files?.[0] ?? null)}
+          />
+          {previewUrl && (
+            <div style={{ marginTop: 8 }}>
+              <img
+                src={previewUrl}
+                alt="preview"
+                style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 8, border: '1px solid #e5e7eb' }}
+              />
+            </div>
+          )}
         </div>
-        <label>強度 0–5：<input name="intensity" type="range" min="0" max="5" defaultValue="3" /></label>
-        <label>好ましさ −3〜+3：<input name="valence" type="range" min="-3" max="3" defaultValue="0" /></label>
-        <label>活性度 1–5：<input name="arousal" type="range" min="1" max="5" defaultValue="3" /></label>
 
-        <fieldset style={{border:'1px solid #e5e7eb',padding:8}}>
-          <legend>気分タグ（最大3つ目安）</legend>
-          {['集中','穏やか','前向き','疲れ','不安','眠い','ワクワク'].map(tag => (
-            <label key={tag} style={{marginRight:8}}>
-              <input type="checkbox" name="mood" value={tag} /> {tag}
-            </label>
-          ))}
-        </fieldset>
+        <div>
+          <label htmlFor="text">自由記述</label>
+          <textarea
+            id="text"
+            name="text"
+            placeholder="においの印象、状況、感じたことなど"
+            rows={4}
+            required
+            style={{ width: '100%' }}
+          />
+        </div>
 
-        <input name="place" placeholder="場所（例：研究室/自宅/電車）" />
-        <textarea name="notes" placeholder="メモ（任意）" rows={2} />
+        <label>
+          強さ 0–10：
+          <input name="intensity" type="range" min="0" max="10" defaultValue="5" />
+        </label>
 
-        <button type="submit" style={{padding:'10px 14px'}}>保存</button>
+        <label>
+          快・不快 -5〜+5：
+          <input name="pleasantness" type="range" min="-5" max="5" defaultValue="0" />
+        </label>
+
+        <label>
+          なじみ 0–10：
+          <input name="familiarity" type="range" min="0" max="10" defaultValue="5" />
+        </label>
+
+        <label>
+          さわやかさ 0–10：
+          <input name="freshness" type="range" min="0" max="10" defaultValue="5" />
+        </label>
+
+        <label>
+          甘さ 0–10：
+          <input name="sweetness" type="range" min="0" max="10" defaultValue="5" />
+        </label>
+
+        <button type="submit" style={{ padding: '10px 14px' }}>保存</button>
       </form>
 
-      <h2 style={{marginTop:24,fontSize:18}}>履歴</h2>
-      <ul style={{listStyle:'none',padding:0,display:'grid',gap:10}}>
-        {entries.map(e => (
-          <li key={e.id} style={{border:'1px solid #e5e7eb',borderRadius:8,padding:12}}>
-            <div style={{fontSize:12,color:'#6b7280'}}>{new Date(e.timestamp).toLocaleString()}</div>
-            <div style={{fontWeight:600}}>{e.scent}（強度{e.intensity}）</div>
-            <div>好ましさ {e.valence} / 活性度 {e.arousal}</div>
-            {e.moodTags.length>0 && <div>気分：{e.moodTags.join('・')}</div>}
-            {e.place && <div>場所：{e.place}</div>}
-            {e.notes && <div>メモ：{e.notes}</div>}
+      <h2 style={{ marginTop: 24, fontSize: 18 }}>履歴</h2>
+      <ul style={{ listStyle: 'none', padding: 0, display: 'grid', gap: 12 }}>
+        {entries.map((e) => (
+          <li key={e.id} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 12 }}>
+            <div style={{ fontSize: 12, color: '#6b7280' }}>
+              {new Date(e.timestamp).toLocaleString()}
+            </div>
+
+            {e.image && (
+              <div style={{ marginTop: 8 }}>
+                <img
+                  src={e.image.dataUrl}
+                  alt={e.image.name}
+                  style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 8 }}
+                />
+              </div>
+            )}
+
+            <div style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{e.text}</div>
+
+            <div style={{ marginTop: 8 }}>
+              強さ {e.params.intensity} / 快不快 {e.params.pleasantness} / なじみ {e.params.familiarity}
+            </div>
+            <div>
+              さわやかさ {e.params.freshness} / 甘さ {e.params.sweetness}
+            </div>
           </li>
         ))}
       </ul>
